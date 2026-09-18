@@ -8,6 +8,8 @@ const here = import.meta.dirname;
 
 export default defineConfig({
   plugins: [react()],
+  // The .env lives at the repo root so a single file configures both tiers.
+  envDir: path.resolve(here, '../..'),
   resolve: {
     alias: {
       // Consume the shared package straight from source so a funnel config
