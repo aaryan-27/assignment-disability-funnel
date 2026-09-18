@@ -8,7 +8,8 @@ const here = import.meta.dirname;
 
 export default defineConfig({
   plugins: [react()],
-  // The .env lives at the repo root so a single file configures both tiers.
+  // Read VITE_* vars from the repo-root .env files, the same place the API
+  // reads its config from.
   envDir: path.resolve(here, '../..'),
   resolve: {
     alias: {
