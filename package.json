@@ -1,0 +1,33 @@
+{
+  "name": "qualification-funnel",
+  "private": true,
+  "version": "1.0.0",
+  "description": "Production-minded disability benefits qualification funnel with Meta Pixel + CAPI, n8n automation and Airtable persistence.",
+  "workspaces": [
+    "packages/*",
+    "apps/*"
+  ],
+  "engines": {
+    "node": ">=20.10"
+  },
+  "scripts": {
+    "dev": "npm run build --workspace @funnel/shared && concurrently -n api,web -c magenta,cyan \"npm:dev:api\" \"npm:dev:web\"",
+    "dev:api": "npm run dev --workspace @funnel/api",
+    "dev:web": "npm run dev --workspace @funnel/web",
+    "build": "npm run build --workspace @funnel/shared && npm run build --workspace @funnel/api && npm run build --workspace @funnel/web",
+    "start": "npm run start --workspace @funnel/api",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "typecheck": "npm run typecheck --workspaces --if-present",
+    "lint": "npm run typecheck",
+    "seed:demo": "tsx apps/api/scripts/seed-demo.ts",
+    "clean": "rm -rf node_modules apps/*/node_modules packages/*/node_modules apps/*/dist packages/*/dist"
+  },
+  "devDependencies": {
+    "@types/node": "^22.20.3",
+    "concurrently": "^10.0.5",
+    "tsx": "^4.23.13",
+    "typescript": "^5.9.3",
+    "vitest": "^5.0.1"
+  }
+}

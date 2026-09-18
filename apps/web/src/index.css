@@ -1,0 +1,82 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  :root {
+    color-scheme: light;
+  }
+
+  html {
+    -webkit-text-size-adjust: 100%;
+  }
+
+  body {
+    @apply bg-canvas text-ink antialiased;
+    font-feature-settings: 'cv02', 'cv03', 'cv04', 'cv11';
+    /* Prevents iOS Safari from zooming when a form input is focused. */
+    text-size-adjust: 100%;
+  }
+
+  /*
+   * A single, consistent focus ring for every interactive element.
+   * `:focus-visible` (not `:focus`) so mouse users do not see rings on click
+   * but keyboard users always do.
+   */
+  :where(a, button, input, select, textarea, [tabindex]):focus-visible {
+    @apply outline-none ring-4 ring-brand-500/35 ring-offset-2 ring-offset-white;
+    border-radius: 0.75rem;
+  }
+
+  /* Respect the OS "reduce motion" setting. Vestibular disorders are common in
+     an older audience, which is precisely this funnel's audience. */
+  @media (prefers-reduced-motion: reduce) {
+    *,
+    *::before,
+    *::after {
+      animation-duration: 0.01ms !important;
+      animation-iteration-count: 1 !important;
+      transition-duration: 0.01ms !important;
+      scroll-behavior: auto !important;
+    }
+  }
+}
+
+@layer components {
+  .option-button {
+    @apply relative flex w-full items-center gap-4 rounded-2xl border-2 border-transparent
+           bg-white px-5 py-4 text-left text-lg font-semibold text-ink shadow-option
+           transition-all duration-150 ease-out
+           hover:-translate-y-0.5 hover:border-brand-300 hover:shadow-option-hover
+           active:translate-y-0 active:scale-[0.99]
+           sm:px-6 sm:py-5 sm:text-xl;
+    /* Comfortably above the 44px WCAG target on mobile. */
+    min-height: 60px;
+  }
+
+  .option-button[aria-pressed='true'] {
+    @apply border-brand-600 bg-brand-50 text-brand-800;
+  }
+
+  .field-input {
+    @apply w-full rounded-2xl border-2 border-ink/10 bg-white px-5 py-4 text-lg
+           text-ink placeholder:text-ink-muted/60
+           transition-colors duration-150
+           focus:border-brand-500 focus:outline-none;
+    min-height: 60px;
+  }
+
+  .field-input[aria-invalid='true'] {
+    @apply border-red-400 bg-red-50/40;
+  }
+
+  .primary-cta {
+    @apply flex w-full items-center justify-center gap-2 rounded-2xl bg-brand-600
+           px-6 py-4 text-lg font-bold text-white shadow-lg shadow-brand-600/25
+           transition-all duration-150
+           hover:bg-brand-700 hover:shadow-xl hover:shadow-brand-600/30
+           active:scale-[0.99]
+           disabled:cursor-not-allowed disabled:bg-ink-muted/40 disabled:shadow-none;
+    min-height: 60px;
+  }
+}
