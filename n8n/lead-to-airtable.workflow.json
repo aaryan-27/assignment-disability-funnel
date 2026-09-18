@@ -1,7 +1,7 @@
 {
   "name": "lead_to_airtable",
   "meta": {
-    "description": "Receives a validated lead from the funnel API, enforces idempotency on lead_id, upserts into Airtable, writes the qualification rows and logs the execution. Mirrors apps/api/src/services/n8n/workflow.ts exactly.",
+    "description": "Receives a validated lead from the funnel API, enforces idempotency on funnel_lead_id, upserts into Airtable, writes the qualification rows and logs the execution. Targets the live base described in docs/airtable-schema.md (autonumber lead_id, linked-record child tables).",
     "instanceId": "funnel-qualification-v1"
   },
   "nodes": [
@@ -18,18 +18,24 @@
       "name": "Webhook",
       "type": "n8n-nodes-base.webhook",
       "typeVersion": 2,
-      "position": [-780, 300],
+      "position": [
+        -780,
+        300
+      ],
       "webhookId": "lead-to-airtable"
     },
     {
       "parameters": {
-        "jsCode": "// ---------------------------------------------------------------------------\n// Verify signature + validate payload.\n//\n// n8n webhooks are unauthenticated by default. The funnel API signs every body\n// with SHA-256 over `${body}.${secret}` and sends it as X-Funnel-Signature, so\n// knowing the URL is not enough to inject leads into the CRM.\n//\n// Set N8N_FUNNEL_WEBHOOK_SECRET in the n8n instance environment to the same\n// value as N8N_WEBHOOK_SECRET in the funnel API.\n// ---------------------------------------------------------------------------\nconst crypto = require('crypto');\n\nconst item = $input.first();\nconst body = item.json.body ?? item.json;\nconst headers = item.json.headers ?? {};\nconst secret = $env.N8N_FUNNEL_WEBHOOK_SECRET || '';\n\nif (secret) {\n  const raw = typeof item.json.rawBody === 'string'\n    ? item.json.rawBody\n    : JSON.stringify(body);\n  const expected = crypto.createHash('sha256').update(`${raw}.${secret}`, 'utf8').digest('hex');\n  const provided = headers['x-funnel-signature'] || '';\n\n  const a = Buffer.from(String(provided));\n  const b = Buffer.from(expected);\n  const valid = a.length === b.length && crypto.timingSafeEqual(a, b);\n\n  if (!valid) {\n    return [{ json: { ok: false, statusCode: 401, message: 'Invalid signature' } }];\n  }\n}\n\n// Schema guard. The workflow is edited in a GUI by people who may not be\n// reading the API repo, so an unexpected shape must fail loudly rather than\n// writing empty columns into the CRM.\nconst SUPPORTED_SCHEMA_VERSION = 1;\n\nif (body.schema_version !== SUPPORTED_SCHEMA_VERSION) {\n  return [{ json: { ok: false, statusCode: 400, message: `Unsupported schema_version ${body.schema_version}` } }];\n}\n\nconst required = ['lead_id', 'event_id', 'created_at', 'funnel_version'];\nconst missing = required.filter((key) => !body[key]);\n\nif (missing.length > 0 || !body.lead || !body.lead.email) {\n  return [{ json: { ok: false, statusCode: 400, message: `Payload failed validation: ${missing.join(', ')}` } }];\n}\n\nreturn [{ json: { ok: true, payload: body } }];"
+        "jsCode": "// ---------------------------------------------------------------------------\n// Verify signature, validate payload, and shape the Airtable records.\n//\n// n8n webhooks are unauthenticated by default. The funnel API signs every body\n// with SHA-256 over `${body}.${secret}` and sends it as X-Funnel-Signature, so\n// knowing the URL is not enough to inject leads into the CRM.\n//\n// Hosted n8n usually blocks $env (N8N_BLOCK_ENV_ACCESS_IN_NODE=true), and\n// touching it then throws. In that case paste the values into the FALLBACK\n// constants below instead.\n// ---------------------------------------------------------------------------\nconst FALLBACK_WEBHOOK_SECRET = '';\nconst FALLBACK_AIRTABLE_BASE_ID = '';\n\nfunction readEnv(key, fallback) {\n  try {\n    return $env[key] || fallback;\n  } catch (err) {\n    return fallback;\n  }\n}\n\nconst crypto = require('crypto');\n\nconst item = $input.first();\nconst body = item.json.body ?? item.json;\nconst headers = item.json.headers ?? {};\nconst secret = readEnv('N8N_FUNNEL_WEBHOOK_SECRET', FALLBACK_WEBHOOK_SECRET);\nconst airtableBaseId = readEnv('AIRTABLE_BASE_ID', FALLBACK_AIRTABLE_BASE_ID);\n\nif (secret) {\n  const raw = typeof item.json.rawBody === 'string'\n    ? item.json.rawBody\n    : JSON.stringify(body);\n  const expected = crypto.createHash('sha256').update(`${raw}.${secret}`, 'utf8').digest('hex');\n  const provided = headers['x-funnel-signature'] || '';\n\n  const a = Buffer.from(String(provided));\n  const b = Buffer.from(expected);\n  const valid = a.length === b.length && crypto.timingSafeEqual(a, b);\n\n  if (!valid) {\n    return [{ json: { ok: false, statusCode: 401, message: 'Invalid signature' } }];\n  }\n}\n\n// Schema guard. The workflow is edited in a GUI by people who may not be\n// reading the API repo, so an unexpected shape must fail loudly rather than\n// writing empty columns into the CRM.\nconst SUPPORTED_SCHEMA_VERSION = 1;\n\nif (body.schema_version !== SUPPORTED_SCHEMA_VERSION) {\n  return [{ json: { ok: false, statusCode: 400, message: `Unsupported schema_version ${body.schema_version}` } }];\n}\n\nconst required = ['lead_id', 'event_id', 'created_at', 'funnel_version'];\nconst missing = required.filter((key) => !body[key]);\n\nif (missing.length > 0 || !body.lead || !body.lead.email) {\n  return [{ json: { ok: false, statusCode: 400, message: `Payload failed validation: ${missing.join(', ')}` } }];\n}\n\nif (!airtableBaseId) {\n  return [{ json: { ok: false, statusCode: 500, message: 'AIRTABLE_BASE_ID is not configured' } }];\n}\n\n// Map the API's vocabulary onto the base's single-select options. Unknown\n// values fall back to 'New' rather than creating stray options via typecast.\nconst STATUS = {\n  new: 'New',\n  qualified: 'Qualified',\n  review: 'In Progress',\n  disqualified: 'Disqualified',\n  duplicate: 'New',\n};\n\nconst lead = body.lead;\nconst attribution = body.attribution || {};\nconst score = Number(lead.qualification_score) || 0;\nconst priority = score >= 70 ? 'High' : score >= 40 ? 'Medium' : 'Low';\n\n// The base has no columns for outcome, reasons or referrer, so they go into\n// notes. Reasons are internal only - this base must never feed an ad platform.\nconst notes = [\n  `Outcome: ${lead.qualification_outcome}`,\n  `Reasons: ${(lead.qualification_reasons || []).join(', ') || 'none'}`,\n  lead.lead_status === 'duplicate' ? 'Repeat submission from a known person.' : null,\n  attribution.referrer ? `Referrer: ${attribution.referrer}` : null,\n].filter(Boolean).join('\\n');\n\n// Fields refreshed on every delivery, including replays.\nconst updateFields = {\n  lead_status: STATUS[lead.lead_status] || 'New',\n  lead_priority: priority,\n  qualification_score: score,\n  notes,\n};\n\nconst leadFields = {\n  funnel_lead_id: body.lead_id,\n  conversion_event_id: body.event_id,\n  first_name: lead.first_name || '',\n  last_name: lead.last_name || '',\n  email: lead.email,\n  phone: lead.phone || '',\n  funnel_version: body.funnel_version,\n  source: attribution.source || 'direct',\n  medium: attribution.medium || '',\n  campaign: attribution.campaign || '',\n  content: attribution.content || '',\n  term: attribution.term || '',\n  fbclid: attribution.fbclid || '',\n  landing_page: attribution.landing_page || '',\n  ...updateFields,\n};\n\nreturn [{\n  json: {\n    ok: true,\n    payload: body,\n    airtable_base_id: airtableBaseId,\n    lead_fields: leadFields,\n    update_fields: updateFields,\n  },\n}];"
       },
       "id": "a1000000-0000-4000-8000-000000000002",
       "name": "Verify & Validate",
       "type": "n8n-nodes-base.code",
       "typeVersion": 2,
-      "position": [-560, 300]
+      "position": [
+        -560,
+        300
+      ]
     },
     {
       "parameters": {
@@ -58,14 +64,17 @@
       "name": "Is Valid?",
       "type": "n8n-nodes-base.if",
       "typeVersion": 2,
-      "position": [-340, 300]
+      "position": [
+        -340,
+        300
+      ]
     },
     {
       "parameters": {
         "operation": "search",
         "base": {
           "__rl": true,
-          "value": "={{ $env.AIRTABLE_BASE_ID }}",
+          "value": "={{ $('Verify & Validate').first().json.airtable_base_id }}",
           "mode": "id"
         },
         "table": {
@@ -73,7 +82,7 @@
           "value": "Leads",
           "mode": "name"
         },
-        "filterByFormula": "={{ \"{lead_id} = '\" + $json.payload.lead_id.replace(/'/g, \"\\\\'\") + \"'\" }}",
+        "filterByFormula": "={{ \"{funnel_lead_id} = '\" + $json.payload.lead_id.replace(/'/g, \"\\\\'\") + \"'\" }}",
         "limit": 1,
         "options": {}
       },
@@ -81,9 +90,12 @@
       "name": "Idempotency: Find Lead",
       "type": "n8n-nodes-base.airtable",
       "typeVersion": 2.1,
-      "position": [-100, 200],
+      "position": [
+        -100,
+        200
+      ],
       "alwaysOutputData": true,
-      "notes": "IDEMPOTENCY PROBE. Airtable has no unique constraints, so the check must be explicit and must run before any write. lead_id is the idempotency key."
+      "notes": "IDEMPOTENCY PROBE. Airtable has no unique constraints, so the check must be explicit and must run before any write. funnel_lead_id (the API's ld_ id) is the idempotency key; lead_id in this base is an autonumber."
     },
     {
       "parameters": {
@@ -112,15 +124,31 @@
       "name": "Already Exists?",
       "type": "n8n-nodes-base.if",
       "typeVersion": 2,
-      "position": [120, 200],
+      "position": [
+        120,
+        200
+      ],
       "notes": "TRUE  -> duplicate: update in place, respond 200 duplicate=true.\nFALSE -> new lead: create Leads + Qualification rows."
+    },
+    {
+      "parameters": {
+        "jsCode": "// Record id from the search result plus the fields a replay refreshes.\nreturn [{ json: { id: $json.id, ...$('Verify & Validate').first().json.update_fields } }];"
+      },
+      "id": "a1000000-0000-4000-8000-000000000006",
+      "name": "Prepare Update",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        340,
+        60
+      ]
     },
     {
       "parameters": {
         "operation": "update",
         "base": {
           "__rl": true,
-          "value": "={{ $env.AIRTABLE_BASE_ID }}",
+          "value": "={{ $('Verify & Validate').first().json.airtable_base_id }}",
           "mode": "id"
         },
         "table": {
@@ -129,33 +157,45 @@
           "mode": "name"
         },
         "columns": {
-          "mappingMode": "defineBelow",
-          "value": {
-            "id": "={{ $json.id }}",
-            "lead_status": "={{ $('Verify & Validate').item.json.payload.lead.lead_status }}",
-            "qualification_outcome": "={{ $('Verify & Validate').item.json.payload.lead.qualification_outcome }}",
-            "qualification_score": "={{ $('Verify & Validate').item.json.payload.lead.qualification_score }}",
-            "last_synced_at": "={{ $now.toISO() }}"
-          },
-          "matchingColumns": ["id"]
+          "mappingMode": "autoMapInputData",
+          "value": {},
+          "matchingColumns": [
+            "id"
+          ]
         },
         "options": {
           "typecast": true
         }
       },
-      "id": "a1000000-0000-4000-8000-000000000006",
+      "id": "a1000000-0000-4000-8000-000000000007",
       "name": "Update Existing Lead",
       "type": "n8n-nodes-base.airtable",
       "typeVersion": 2.1,
-      "position": [360, 100],
-      "notes": "A replay carries the freshest data, so we update rather than ignore. The operator would rather have a corrected record than a second one."
+      "position": [
+        560,
+        60
+      ],
+      "notes": "A replay carries the freshest data, so we update rather than ignore."
+    },
+    {
+      "parameters": {
+        "jsCode": "return [{\n  json: {\n    lead_id: [$('Update Existing Lead').first().json.id],\n    workflow: 'lead_to_airtable/duplicate',\n    status: 'Success',\n    retry_count: 0,\n    last_attempt: new Date().toISOString(),\n  },\n}];"
+      },
+      "id": "a1000000-0000-4000-8000-000000000008",
+      "name": "Prepare Duplicate Run",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        780,
+        60
+      ]
     },
     {
       "parameters": {
         "operation": "create",
         "base": {
           "__rl": true,
-          "value": "={{ $env.AIRTABLE_BASE_ID }}",
+          "value": "={{ $('Verify & Validate').first().json.airtable_base_id }}",
           "mode": "id"
         },
         "table": {
@@ -164,48 +204,60 @@
           "mode": "name"
         },
         "columns": {
-          "mappingMode": "defineBelow",
-          "value": {
-            "lead_id": "={{ $('Verify & Validate').item.json.payload.lead_id }}",
-            "event_id": "={{ $('Verify & Validate').item.json.payload.event_id }}",
-            "workflow": "lead_to_airtable",
-            "status": "duplicate_ignored",
-            "retry_count": 0,
-            "last_attempt": "={{ $now.toISO() }}"
-          }
+          "mappingMode": "autoMapInputData",
+          "value": {}
         },
         "options": {
           "typecast": true
         }
       },
-      "id": "a1000000-0000-4000-8000-000000000007",
+      "id": "a1000000-0000-4000-8000-000000000009",
       "name": "Log Duplicate Run",
       "type": "n8n-nodes-base.airtable",
       "typeVersion": 2.1,
-      "position": [580, 100],
+      "position": [
+        1000,
+        60
+      ],
       "notes": "Duplicates are recorded, not silently swallowed - 'duplicates prevented' is a real operational metric."
     },
     {
       "parameters": {
         "respondWith": "json",
-        "responseBody": "={{ JSON.stringify({ ok: true, duplicate: true, airtable_record_id: $('Already Exists?').item.json.id, workflow: 'lead_to_airtable' }) }}",
+        "responseBody": "={{ JSON.stringify({ ok: true, duplicate: true, airtable_record_id: $('Update Existing Lead').first().json.id, workflow: 'lead_to_airtable' }) }}",
         "options": {
           "responseCode": 200
         }
       },
-      "id": "a1000000-0000-4000-8000-000000000008",
+      "id": "a1000000-0000-4000-8000-00000000000a",
       "name": "Respond Duplicate",
       "type": "n8n-nodes-base.respondToWebhook",
       "typeVersion": 1.1,
-      "position": [800, 100],
+      "position": [
+        1220,
+        60
+      ],
       "notes": "200, NOT an error. A replay is an expected outcome of at-least-once delivery; returning an error here would make the caller's outbox retry forever."
+    },
+    {
+      "parameters": {
+        "jsCode": "return [{ json: $('Verify & Validate').first().json.lead_fields }];"
+      },
+      "id": "a1000000-0000-4000-8000-00000000000b",
+      "name": "Prepare New Lead",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        340,
+        320
+      ]
     },
     {
       "parameters": {
         "operation": "create",
         "base": {
           "__rl": true,
-          "value": "={{ $env.AIRTABLE_BASE_ID }}",
+          "value": "={{ $('Verify & Validate').first().json.airtable_base_id }}",
           "mode": "id"
         },
         "table": {
@@ -214,60 +266,42 @@
           "mode": "name"
         },
         "columns": {
-          "mappingMode": "defineBelow",
-          "value": {
-            "lead_id": "={{ $('Verify & Validate').item.json.payload.lead_id }}",
-            "created_at": "={{ $('Verify & Validate').item.json.payload.created_at }}",
-            "first_name": "={{ $('Verify & Validate').item.json.payload.lead.first_name }}",
-            "last_name": "={{ $('Verify & Validate').item.json.payload.lead.last_name }}",
-            "email": "={{ $('Verify & Validate').item.json.payload.lead.email }}",
-            "phone": "={{ $('Verify & Validate').item.json.payload.lead.phone }}",
-            "funnel_version": "={{ $('Verify & Validate').item.json.payload.funnel_version }}",
-            "source": "={{ $('Verify & Validate').item.json.payload.attribution.source || 'direct' }}",
-            "medium": "={{ $('Verify & Validate').item.json.payload.attribution.medium || '' }}",
-            "campaign": "={{ $('Verify & Validate').item.json.payload.attribution.campaign || '' }}",
-            "content": "={{ $('Verify & Validate').item.json.payload.attribution.content || '' }}",
-            "term": "={{ $('Verify & Validate').item.json.payload.attribution.term || '' }}",
-            "fbclid": "={{ $('Verify & Validate').item.json.payload.attribution.fbclid || '' }}",
-            "landing_page": "={{ $('Verify & Validate').item.json.payload.attribution.landing_page || '' }}",
-            "referrer": "={{ $('Verify & Validate').item.json.payload.attribution.referrer || '' }}",
-            "lead_status": "={{ $('Verify & Validate').item.json.payload.lead.lead_status }}",
-            "qualification_outcome": "={{ $('Verify & Validate').item.json.payload.lead.qualification_outcome }}",
-            "qualification_score": "={{ $('Verify & Validate').item.json.payload.lead.qualification_score }}",
-            "qualification_reasons": "={{ ($('Verify & Validate').item.json.payload.lead.qualification_reasons || []).join(', ') }}",
-            "conversion_event_id": "={{ $('Verify & Validate').item.json.payload.event_id }}",
-            "last_synced_at": "={{ $now.toISO() }}"
-          }
+          "mappingMode": "autoMapInputData",
+          "value": {}
         },
         "options": {
           "typecast": true
         }
       },
-      "id": "a1000000-0000-4000-8000-000000000009",
+      "id": "a1000000-0000-4000-8000-00000000000c",
       "name": "Create Lead",
       "type": "n8n-nodes-base.airtable",
       "typeVersion": 2.1,
-      "position": [360, 320]
+      "position": [
+        560,
+        320
+      ]
     },
     {
       "parameters": {
-        "fieldToSplitOut": "qualification",
-        "include": "noOtherFields",
-        "options": {}
+        "jsCode": "// One Airtable row per answered question (EAV shape). Adding a question to the\n// funnel needs no schema change here. lead_id is a link field, so it takes the\n// Leads record id rather than the funnel's ld_ id.\nconst recordId = $('Create Lead').first().json.id;\nconst answers = $('Verify & Validate').first().json.payload.qualification || [];\n\nreturn answers.map((row) => ({\n  json: {\n    lead_id: [recordId],\n    question_id: row.question_id,\n    answer: row.answer,\n    timestamp: row.timestamp,\n  },\n}));"
       },
-      "id": "a1000000-0000-4000-8000-00000000000a",
-      "name": "Split Qualification Rows",
-      "type": "n8n-nodes-base.splitOut",
-      "typeVersion": 1,
-      "position": [580, 320],
-      "notes": "One Airtable row per answered question (EAV shape). Adding question 16 to the funnel needs no schema migration here."
+      "id": "a1000000-0000-4000-8000-00000000000d",
+      "name": "Build Qualification Rows",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        780,
+        240
+      ],
+      "notes": "Runs before the run log (upper branch, executionOrder v1). If this branch fails the workflow errors, n8n returns 500 and the caller retries; idempotency makes that safe."
     },
     {
       "parameters": {
         "operation": "create",
         "base": {
           "__rl": true,
-          "value": "={{ $env.AIRTABLE_BASE_ID }}",
+          "value": "={{ $('Verify & Validate').first().json.airtable_base_id }}",
           "mode": "id"
         },
         "table": {
@@ -276,30 +310,41 @@
           "mode": "name"
         },
         "columns": {
-          "mappingMode": "defineBelow",
-          "value": {
-            "lead_id": "={{ $('Verify & Validate').first().json.payload.lead_id }}",
-            "question_id": "={{ $json.question_id }}",
-            "answer": "={{ $json.answer }}",
-            "timestamp": "={{ $json.timestamp }}"
-          }
+          "mappingMode": "autoMapInputData",
+          "value": {}
         },
         "options": {
           "typecast": true
         }
       },
-      "id": "a1000000-0000-4000-8000-00000000000b",
+      "id": "a1000000-0000-4000-8000-00000000000e",
       "name": "Create Qualification Rows",
       "type": "n8n-nodes-base.airtable",
       "typeVersion": 2.1,
-      "position": [800, 320]
+      "position": [
+        1000,
+        240
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "return [{\n  json: {\n    lead_id: [$('Create Lead').first().json.id],\n    workflow: 'lead_to_airtable',\n    status: 'Success',\n    retry_count: 0,\n    last_attempt: new Date().toISOString(),\n  },\n}];"
+      },
+      "id": "a1000000-0000-4000-8000-00000000000f",
+      "name": "Prepare Run Log",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        780,
+        420
+      ]
     },
     {
       "parameters": {
         "operation": "create",
         "base": {
           "__rl": true,
-          "value": "={{ $env.AIRTABLE_BASE_ID }}",
+          "value": "={{ $('Verify & Validate').first().json.airtable_base_id }}",
           "mode": "id"
         },
         "table": {
@@ -308,26 +353,21 @@
           "mode": "name"
         },
         "columns": {
-          "mappingMode": "defineBelow",
-          "value": {
-            "lead_id": "={{ $('Verify & Validate').first().json.payload.lead_id }}",
-            "event_id": "={{ $('Verify & Validate').first().json.payload.event_id }}",
-            "workflow": "lead_to_airtable",
-            "status": "succeeded",
-            "retry_count": 0,
-            "last_attempt": "={{ $now.toISO() }}"
-          }
+          "mappingMode": "autoMapInputData",
+          "value": {}
         },
         "options": {
           "typecast": true
         }
       },
-      "id": "a1000000-0000-4000-8000-00000000000c",
+      "id": "a1000000-0000-4000-8000-000000000010",
       "name": "Log Successful Run",
       "type": "n8n-nodes-base.airtable",
       "typeVersion": 2.1,
-      "position": [1020, 320],
-      "executeOnce": true
+      "position": [
+        1000,
+        420
+      ]
     },
     {
       "parameters": {
@@ -337,11 +377,14 @@
           "responseCode": 200
         }
       },
-      "id": "a1000000-0000-4000-8000-00000000000d",
+      "id": "a1000000-0000-4000-8000-000000000011",
       "name": "Respond Created",
       "type": "n8n-nodes-base.respondToWebhook",
       "typeVersion": 1.1,
-      "position": [1240, 320]
+      "position": [
+        1220,
+        420
+      ]
     },
     {
       "parameters": {
@@ -351,68 +394,190 @@
           "responseCode": "={{ $json.statusCode || 400 }}"
         }
       },
-      "id": "a1000000-0000-4000-8000-00000000000e",
+      "id": "a1000000-0000-4000-8000-000000000012",
       "name": "Respond Rejected",
       "type": "n8n-nodes-base.respondToWebhook",
       "typeVersion": 1.1,
-      "position": [-100, 460],
+      "position": [
+        -100,
+        460
+      ],
       "notes": "4xx is deliberate. The caller's outbox classifies 4xx as non-retryable and dead-letters immediately rather than burning its retry budget on a payload that can never be accepted."
-    },
-    {
-      "parameters": {
-        "respondWith": "json",
-        "responseBody": "={{ JSON.stringify({ ok: false, message: 'Workflow error: ' + ($json.error?.message || 'unknown') }) }}",
-        "options": {
-          "responseCode": 500
-        }
-      },
-      "id": "a1000000-0000-4000-8000-00000000000f",
-      "name": "Respond Error",
-      "type": "n8n-nodes-base.respondToWebhook",
-      "typeVersion": 1.1,
-      "position": [360, 560],
-      "notes": "5xx tells the caller this IS retryable. The outbox will back off and try again; idempotency on lead_id makes that safe."
     }
   ],
   "connections": {
     "Webhook": {
-      "main": [[{ "node": "Verify & Validate", "type": "main", "index": 0 }]]
+      "main": [
+        [
+          {
+            "node": "Verify & Validate",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
     },
     "Verify & Validate": {
-      "main": [[{ "node": "Is Valid?", "type": "main", "index": 0 }]]
+      "main": [
+        [
+          {
+            "node": "Is Valid?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
     },
     "Is Valid?": {
       "main": [
-        [{ "node": "Idempotency: Find Lead", "type": "main", "index": 0 }],
-        [{ "node": "Respond Rejected", "type": "main", "index": 0 }]
+        [
+          {
+            "node": "Idempotency: Find Lead",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Respond Rejected",
+            "type": "main",
+            "index": 0
+          }
+        ]
       ]
     },
     "Idempotency: Find Lead": {
-      "main": [[{ "node": "Already Exists?", "type": "main", "index": 0 }]]
+      "main": [
+        [
+          {
+            "node": "Already Exists?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
     },
     "Already Exists?": {
       "main": [
-        [{ "node": "Update Existing Lead", "type": "main", "index": 0 }],
-        [{ "node": "Create Lead", "type": "main", "index": 0 }]
+        [
+          {
+            "node": "Prepare Update",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Prepare New Lead",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Prepare Update": {
+      "main": [
+        [
+          {
+            "node": "Update Existing Lead",
+            "type": "main",
+            "index": 0
+          }
+        ]
       ]
     },
     "Update Existing Lead": {
-      "main": [[{ "node": "Log Duplicate Run", "type": "main", "index": 0 }]]
+      "main": [
+        [
+          {
+            "node": "Prepare Duplicate Run",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Prepare Duplicate Run": {
+      "main": [
+        [
+          {
+            "node": "Log Duplicate Run",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
     },
     "Log Duplicate Run": {
-      "main": [[{ "node": "Respond Duplicate", "type": "main", "index": 0 }]]
+      "main": [
+        [
+          {
+            "node": "Respond Duplicate",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Prepare New Lead": {
+      "main": [
+        [
+          {
+            "node": "Create Lead",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
     },
     "Create Lead": {
-      "main": [[{ "node": "Split Qualification Rows", "type": "main", "index": 0 }]]
+      "main": [
+        [
+          {
+            "node": "Build Qualification Rows",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Prepare Run Log",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
     },
-    "Split Qualification Rows": {
-      "main": [[{ "node": "Create Qualification Rows", "type": "main", "index": 0 }]]
+    "Build Qualification Rows": {
+      "main": [
+        [
+          {
+            "node": "Create Qualification Rows",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
     },
-    "Create Qualification Rows": {
-      "main": [[{ "node": "Log Successful Run", "type": "main", "index": 0 }]]
+    "Prepare Run Log": {
+      "main": [
+        [
+          {
+            "node": "Log Successful Run",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
     },
     "Log Successful Run": {
-      "main": [[{ "node": "Respond Created", "type": "main", "index": 0 }]]
+      "main": [
+        [
+          {
+            "node": "Respond Created",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
     }
   },
   "settings": {
@@ -426,8 +591,12 @@
   "staticData": null,
   "pinData": {},
   "tags": [
-    { "name": "funnel" },
-    { "name": "crm" }
+    {
+      "name": "funnel"
+    },
+    {
+      "name": "crm"
+    }
   ],
   "versionId": "qualification-v1",
   "active": false

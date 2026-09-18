@@ -143,10 +143,15 @@ export async function sendLeadToN8n(payload: N8nLeadPayload): Promise<N8nRespons
 
   const parsed = await readJsonResponse<N8nResponse>(response, 'n8n');
 
-  if (parsed.ok === false) {
-    throw new IntegrationError('n8n', parsed.message ?? 'Workflow reported failure', {
-      retryable: true,
-    });
+  // Require an explicit `ok: true`. A workflow that stops before reaching a
+  // Respond node still returns 200 with an empty body, and treating that as
+  // delivered would silently lose the lead.
+  if (parsed.ok !== true) {
+    throw new IntegrationError(
+      'n8n',
+      parsed.message ?? 'Workflow did not confirm delivery (no ok: true in response)',
+      { retryable: true },
+    );
   }
 
   logger.info('n8n.sent', {

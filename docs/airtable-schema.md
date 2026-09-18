@@ -7,6 +7,14 @@ rather than one column per question.
 Create a new base and add the tables below. Field names are case-sensitive and
 must match exactly; the workflow writes by name.
 
+> **The live base differs from this spec, and the n8n workflow targets the live
+> base.** There, `Leads.lead_id` is an autonumber, so the funnel's `ld_…` id is
+> stored in `funnel_lead_id` (the idempotency key). The `lead_id` field in
+> `Qualification` and `Automation Runs` is a link to `Leads`. Statuses map onto
+> the base's select options (`review` → `In Progress`). Outcome, reasons and
+> referrer go into `notes`. The in-process mock (`apps/api/src/services/n8n/workflow.ts`)
+> still follows the spec below.
+
 ---
 
 ## 1. `Leads`
