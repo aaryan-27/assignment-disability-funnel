@@ -1,8 +1,9 @@
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { env, isTest } from '../config/env.js';
+import { env, isTest, isVercel } from '../config/env.js';
 import { logger } from '../lib/logger.js';
+import type { Store } from './store.js';
 import { emptyDatabase, type DatabaseShape } from './types.js';
 
 /**
@@ -35,10 +36,15 @@ const DB_FILENAME = 'funnel-db.json';
 const REPO_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../../../..');
 
 function resolveDataDir(dir: string): string {
-  return path.isAbsolute(dir) ? dir : path.resolve(REPO_ROOT, dir);
+  if (path.isAbsolute(dir)) return dir;
+  // Vercel's deployment directory is read-only; /tmp is the only writable
+  // path. It is ephemeral, so this is a fallback that keeps the funnel up -
+  // production on Vercel should set DATABASE_URL and use the Postgres store.
+  if (isVercel) return '/tmp/funnel-data';
+  return path.resolve(REPO_ROOT, dir);
 }
 
-class JsonStore {
+export class JsonStore implements Store {
   private data: DatabaseShape = emptyDatabase();
   private loaded = false;
   /** Serialises all mutations; every transaction appends to this chain. */
@@ -138,4 +144,3 @@ class JsonStore {
   }
 }
 
-export const store = new JsonStore();

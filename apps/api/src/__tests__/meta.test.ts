@@ -94,6 +94,29 @@ describe('buildUserData', () => {
     }
   });
 
+  it('hashes external_id the same way the Pixel does (trim, lowercase, SHA-256)', () => {
+    const userData = buildUserData({
+      eventName: 'Lead',
+      eventId: 'evt_1',
+      externalId: ' SES_ABC123 ',
+    });
+
+    expect(userData.external_id).toEqual([sha256('ses_abc123')]);
+  });
+
+  it('sends the visitor session id as external_id on a real lead', async () => {
+    const submission = buildSubmission();
+    await request(server).post('/api/leads').send(submission).expect(201);
+
+    const leadJob = (await listJobs(10)).find(
+      (job) => job.type === 'meta_capi' && job.payload.eventName === 'Lead',
+    );
+    const event = buildServerEvent(leadJob!.payload as never);
+    expect(event?.user_data.external_id).toEqual([
+      sha256(submission.client.session_id.trim().toLowerCase()),
+    ]);
+  });
+
   it('passes fbp and the client IP through unhashed, as Meta requires', () => {
     const userData = buildUserData({
       eventName: 'Lead',

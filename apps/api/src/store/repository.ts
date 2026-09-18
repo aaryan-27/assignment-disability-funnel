@@ -1,6 +1,6 @@
 import { newRunId, newQualificationId, newJobId } from '@funnel/shared';
 import { env } from '../config/env.js';
-import { store } from './jsonStore.js';
+import { store } from './store.js';
 import type {
   AutomationRun,
   DatabaseShape,
@@ -257,15 +257,27 @@ export async function enqueueJob(
  * `exclude` holds jobs already attempted in the current drain pass, so one pass
  * can never retry the same job twice however short its backoff turned out.
  */
+/**
+ * How long a job may sit `in_progress` before it is presumed abandoned. On
+ * serverless a function can be frozen or killed mid-job; without this the job
+ * would stay claimed forever and the lead would never reach Meta or the CRM.
+ * Comfortably longer than any single attempt (HTTP timeouts are <= 20s).
+ */
+export const STALE_CLAIM_MS = 5 * 60 * 1000;
+
 export async function claimNextJob(exclude?: ReadonlySet<string>): Promise<OutboxJob | undefined> {
   const timestamp = Date.now();
   return store.transaction((db) => {
-    const job = db.outbox.find(
-      (item) =>
-        (item.status === 'pending' || item.status === 'failed') &&
-        !exclude?.has(item.job_id) &&
-        new Date(item.next_attempt_at).getTime() <= timestamp,
-    );
+    const job = db.outbox.find((item) => {
+      if (exclude?.has(item.job_id)) return false;
+      if (item.status === 'pending' || item.status === 'failed') {
+        return new Date(item.next_attempt_at).getTime() <= timestamp;
+      }
+      return (
+        item.status === 'in_progress' &&
+        timestamp - new Date(item.updated_at).getTime() > STALE_CLAIM_MS
+      );
+    });
     if (!job) return undefined;
     job.status = 'in_progress';
     job.attempts += 1;

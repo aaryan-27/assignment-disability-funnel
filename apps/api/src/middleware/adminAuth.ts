@@ -1,5 +1,5 @@
 import type { NextFunction, Request, Response } from 'express';
-import { env, isProduction } from '../config/env.js';
+import { env, isAdminTokenInsecure, isProduction } from '../config/env.js';
 import { unauthorized } from '../lib/errors.js';
 import { safeCompare } from '../lib/hash.js';
 import { logger } from '../lib/logger.js';
@@ -15,8 +15,13 @@ import { logger } from '../lib/logger.js';
 export function adminAuth(req: Request, _res: Response, next: NextFunction): void {
   const provided = req.header('x-admin-token') ?? '';
 
+  if (isProduction && isAdminTokenInsecure()) {
+    // Refuse to serve lead data behind a missing or guessable placeholder token.
+    next(unauthorized('Admin API is not configured'));
+    return;
+  }
+
   if (!env.ADMIN_API_TOKEN) {
-    // Refuse to serve admin data with auth accidentally disabled in production.
     if (isProduction) {
       next(unauthorized('Admin API is not configured'));
       return;

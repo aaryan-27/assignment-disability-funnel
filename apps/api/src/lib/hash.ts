@@ -37,6 +37,9 @@ export function hashPhone(phone: string | undefined): string | undefined {
 
 export const hashName = (name: string | undefined): string | undefined => hashNormalised(name);
 
+/** Same trim + lowercase + SHA-256 the Pixel applies to its external_id. */
+export const hashExternalId = (id: string | undefined): string | undefined => hashNormalised(id);
+
 /** Meta expects a single character: `m`, `f`. Anything else is omitted. */
 export function hashGender(gender: string | undefined): string | undefined {
   if (gender === 'male') return sha256('m');

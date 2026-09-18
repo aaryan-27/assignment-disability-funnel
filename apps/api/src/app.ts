@@ -6,6 +6,7 @@ import { errorHandler, notFoundHandler } from './middleware/errorHandler.js';
 import { requestContext } from './middleware/requestContext.js';
 import { adminRouter } from './routes/admin.js';
 import { eventsRouter } from './routes/events.js';
+import { cronRouter } from './routes/cron.js';
 import { healthRouter } from './routes/health.js';
 import { leadsRouter } from './routes/leads.js';
 import { mockN8nRouter } from './routes/mockN8n.js';
@@ -65,6 +66,7 @@ export function createApp(): express.Express {
   });
 
   app.use('/', healthRouter);
+  app.use('/api/cron', cronRouter);
   app.use('/api', leadsRouter);
   app.use('/api', eventsRouter);
   app.use('/admin', adminRouter);

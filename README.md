@@ -603,9 +603,12 @@ Full annotated list in [`.env.example`](.env.example). The ones that matter:
 | `META_ACCESS_TOKEN` | — | **Server-side only.** Never `VITE_`-prefixed. |
 | `META_TEST_EVENT_CODE` | — | Remove in production — it diverts conversions into the test stream. |
 | `N8N_WEBHOOK_URL` | local simulator | |
-| `N8N_WEBHOOK_SECRET` | `local-dev-secret` | Must match n8n's `N8N_FUNNEL_WEBHOOK_SECRET`. |
+| `N8N_WEBHOOK_SECRET` | `local-dev-secret` | Must match n8n's `N8N_FUNNEL_WEBHOOK_SECRET` (or the `FALLBACK_WEBHOOK_SECRET` constant on hosted n8n). |
+| `N8N_TIMEOUT_MS` | `20000` | n8n Cloud typically answers in 6–10s. |
+| `DATABASE_URL` / `POSTGRES_URL` | — | When set, the store uses Postgres. Required on Vercel. |
+| `CRON_SECRET` | — | Authenticates Vercel Cron to `/api/cron/drain`. |
 | `AIRTABLE_TOKEN` / `AIRTABLE_BASE_ID` | — | |
-| `ADMIN_API_TOKEN` | `local-admin-token` | Guards `/admin/*`. Typed into the dashboard at runtime — there is deliberately **no** `VITE_ADMIN_TOKEN`, because a `VITE_`-prefixed variable is inlined into the public bundle. |
+| `ADMIN_API_TOKEN` | `local-admin-token` | Guards `/admin/*`. In production it must be 24+ characters and not the placeholder, or `/admin` stays locked. Typed into the dashboard at runtime — there is deliberately **no** `VITE_ADMIN_TOKEN`, because a `VITE_`-prefixed variable is inlined into the public bundle. |
 | `RATE_LIMIT_MAX_LEADS` | `10` / min / IP | |
 | `RATE_LIMIT_MAX_EVENTS` | `600` / min / IP | Deliberately generous: a 15-step funnel emits ~20 beacons per user and corporate NAT means many users share one IP. Too tight a limit silently deletes analytics. |
 | `OUTBOX_MAX_ATTEMPTS` | `5` | |
@@ -920,18 +923,22 @@ box-ticking section.
 
 ## 20. Deployment
 
+**Vercel (current target):** follow [docs/deployment.md](docs/deployment.md).
+It covers the Postgres store, environment variables, n8n setup and the Meta
+go-live sequence.
+
 | Piece | Where | Notes |
 |---|---|---|
 | `apps/web` | Any static host (Vercel, Netlify, CloudFront) | `npm run build` → `dist/`. Needs an SPA rewrite to `index.html`. |
-| `apps/api` | Container host (Fly, Render, ECS, Cloud Run) | `npm run build && npm start`. Health `/health`, readiness `/ready`. |
+| `apps/api` | Vercel function (`api/index.mjs`) or a container host (Fly, Render, ECS, Cloud Run) | `npm run build && npm start`. Health `/health`, readiness `/ready`. Set `DATABASE_URL` for Postgres. |
 | n8n | n8n Cloud or self-hosted | |
 | Airtable | Hosted | |
 
 **Before real traffic, two changes are required** (both are deliberate take-home
 simplifications, see §21):
 
-1. **Replace the JSON store with Postgres.** Everything above it uses the
-   repository interface, so this is a single-module change.
+1. **Use Postgres, not the JSON file.** Set `DATABASE_URL` and the store
+   switches to Postgres (`apps/api/src/store/pgStore.ts`). Required on Vercel.
 2. **Run the outbox worker as a separate process** so API instances stay
    stateless and horizontally scalable. The worker is already isolated behind
    `startOutboxWorker()`.

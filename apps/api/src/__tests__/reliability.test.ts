@@ -1,7 +1,7 @@
 import { afterAll, beforeEach, describe, expect, it } from 'vitest';
 import request from 'supertest';
 import { createApp } from '../app.js';
-import { resetStore, snapshot, listJobs } from '../store/repository.js';
+import { resetStore, snapshot, listJobs, updateJob, STALE_CLAIM_MS } from '../store/repository.js';
 import { resetMockAirtable } from '../services/airtable/client.js';
 import { setFailureInjection, setFailureRate } from '../services/mockControl.js';
 import { computeBackoffMs, drainOutbox, processJob } from '../services/outbox/worker.js';
@@ -281,6 +281,53 @@ describe('backoff schedule', () => {
     expect(crmJob?.attempts).toBe(1);
     expect(crmJob?.status).toBe('failed');
     setFailureInjection('airtable', false);
+  });
+});
+
+describe('outbox: abandoned claims', () => {
+  // On serverless a function can be killed mid-job, leaving it in_progress.
+  it('reclaims a job stuck in_progress past the stale window', async () => {
+    await request(server).post('/api/leads').send(buildSubmission()).expect(201);
+    const crmJob = (await listJobs(10)).find((job) => job.type === 'lead_to_airtable')!;
+    const staleSince = new Date(Date.now() - STALE_CLAIM_MS - 1000).toISOString();
+    await updateJob(crmJob.job_id, { status: 'in_progress', attempts: 1 });
+    // updateJob stamps updated_at, so backdate it in a second write.
+    await import('../store/store.js').then(({ store }) =>
+      store.transaction((db) => {
+        const job = db.outbox.find((item) => item.job_id === crmJob.job_id)!;
+        job.updated_at = staleSince;
+      }),
+    );
+
+    await drainOutbox();
+
+    const recovered = (await listJobs(10)).find((job) => job.job_id === crmJob.job_id);
+    expect(recovered?.status).toBe('succeeded');
+    expect(recovered?.attempts).toBe(2);
+  });
+
+  it('leaves a recently claimed job alone', async () => {
+    await request(server).post('/api/leads').send(buildSubmission()).expect(201);
+    const crmJob = (await listJobs(10)).find((job) => job.type === 'lead_to_airtable')!;
+    await updateJob(crmJob.job_id, { status: 'in_progress', attempts: 1 });
+
+    await drainOutbox();
+
+    const untouched = (await listJobs(10)).find((job) => job.job_id === crmJob.job_id);
+    expect(untouched?.status).toBe('in_progress');
+    expect(untouched?.attempts).toBe(1);
+  });
+});
+
+describe('scheduled drain', () => {
+  it('drains due jobs when called by the cron', async () => {
+    await request(server).post('/api/leads').send(buildSubmission()).expect(201);
+
+    const response = await request(server).get('/api/cron/drain').expect(200);
+
+    expect(response.body.processed).toBeGreaterThan(0);
+    const jobs = await listJobs(10);
+    expect(jobs.every((job) => job.status === 'succeeded')).toBe(true);
   });
 });
 

@@ -6,7 +6,7 @@ import {
   type MetaCustomData,
 } from '@funnel/shared';
 import { env } from '../../config/env.js';
-import { hashEmail, hashGender, hashName, hashPhone } from '../../lib/hash.js';
+import { hashEmail, hashExternalId, hashGender, hashName, hashPhone } from '../../lib/hash.js';
 import { logger } from '../../lib/logger.js';
 
 /**
@@ -27,6 +27,7 @@ export interface MetaUserData {
   fn?: string[];
   ln?: string[];
   ge?: string[];
+  external_id?: string[];
   fbp?: string;
   fbc?: string;
   client_ip_address?: string;
@@ -53,6 +54,13 @@ export interface BuildEventInput {
   firstName?: string;
   lastName?: string;
   gender?: string;
+  /**
+   * Stable first-party visitor id (the funnel session id, persisted in the
+   * browser). The Pixel is initialised with the same value, so browser and
+   * server events carry the same hashed external_id - one of the strongest
+   * match keys Meta has, and it works even before an email is known.
+   */
+  externalId?: string;
   fbp?: string;
   fbc?: string;
   fbclid?: string;
@@ -91,6 +99,7 @@ export function buildUserData(input: BuildEventInput): MetaUserData {
     fn: wrap(hashName(input.firstName)),
     ln: wrap(hashName(input.lastName)),
     ge: wrap(hashGender(input.gender)),
+    external_id: wrap(hashExternalId(input.externalId)),
     fbp: input.fbp,
     fbc: input.fbc ?? buildFbc(input.fbclid),
     client_ip_address: input.clientIp,

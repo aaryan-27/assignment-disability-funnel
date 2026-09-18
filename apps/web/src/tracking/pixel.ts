@@ -1,3 +1,4 @@
+import { getSessionId } from '../lib/attribution.js';
 import { webEnv } from '../lib/env.js';
 
 /**
@@ -62,7 +63,10 @@ export function initPixel(): void {
     document.head.appendChild(script);
   }
 
-  window.fbq?.('init', webEnv.metaPixelId);
+  // external_id: the same persisted visitor id the server sends with CAPI
+  // events, so both copies of a conversion match to the same person. The Pixel
+  // normalises and hashes it before it leaves the browser.
+  window.fbq?.('init', webEnv.metaPixelId, { external_id: getSessionId() });
   initialised = true;
 }
 

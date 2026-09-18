@@ -1,5 +1,5 @@
 import { createApp } from './app.js';
-import { describeIntegrations, env } from './config/env.js';
+import { describeIntegrations, env, logConfigWarnings } from './config/env.js';
 import { logger } from './lib/logger.js';
 import { startOutboxWorker, stopOutboxWorker } from './services/outbox/worker.js';
 
@@ -12,6 +12,7 @@ const server = app.listen(env.PORT, () => {
     funnel_version: env.FUNNEL_VERSION,
     integrations: describeIntegrations(),
   });
+  logConfigWarnings((msg, meta) => logger.warn(msg, meta));
 });
 
 startOutboxWorker();

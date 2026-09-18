@@ -203,6 +203,7 @@ export async function createLead(
       // `gender` is the only questionnaire answer permitted to reach Meta, and
       // only as a hashed Advanced Matching key - never as a custom parameter.
       gender: typeof cleanAnswers.gender === 'string' ? cleanAnswers.gender : undefined,
+      externalId: client.session_id,
       fbp: attribution.fbp,
       fbc: attribution.fbc,
       fbclid: attribution.fbclid,
@@ -310,6 +311,7 @@ export async function captureEmail(
     email: input.email,
     gender:
       typeof audit.accepted.gender === 'string' ? audit.accepted.gender : undefined,
+    externalId: input.client.session_id,
     fbp: input.attribution.fbp,
     fbc: input.attribution.fbc,
     fbclid: input.attribution.fbclid,
