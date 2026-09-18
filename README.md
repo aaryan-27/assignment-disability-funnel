@@ -923,8 +923,8 @@ box-ticking section.
 
 ## 20. Deployment
 
-**Vercel (current target):** follow [docs/deployment.md](docs/deployment.md).
-It covers the Postgres store, environment variables, n8n setup and the Meta
+**Vercel (current target).** The API needs a Postgres store (`DATABASE_URL`),
+the environment variables listed above, a configured n8n workflow and the Meta
 go-live sequence.
 
 | Piece | Where | Notes |
